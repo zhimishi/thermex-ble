@@ -1,0 +1,23 @@
+name: Publish to PyPI
+
+# Publishes on every GitHub release. Uses PyPI trusted publishing, so there is
+# no API token to store: configure the publisher once at
+# https://pypi.org/manage/account/publishing/
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1
