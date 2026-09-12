@@ -20,7 +20,7 @@ import asyncio
 from thermex_ble import ThermexHood
 
 async def main():
-    hood = ThermexHood("44:17:93:5C:AD:96")
+    hood = ThermexHood("AA:BB:CC:DD:EE:FF")
     hood.register_callback(lambda state: print(state.speed, state.brightness))
 
     await hood.connect()

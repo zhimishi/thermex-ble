@@ -3,6 +3,10 @@
 Every frame here came off the wire - captured with btsnoop on Android or with
 the CLI against the hood. Keeping real frames as fixtures means the decoder is
 verified against reality rather than against my own encoder.
+
+The only edit made to them is the device address in the tail (bytes 42-48),
+replaced with aa:bb:cc:dd:ee:ff. That range sits outside the CRC, which covers
+bytes 0-29, so every checksum here is still the one the hood computed.
 """
 
 import pytest
@@ -21,35 +25,35 @@ from thermex_ble.protocol import (
 
 FRAME_IDLE = bytes.fromhex(
     "0004000000640000000064000006a0000000000000000000780000000000275e"
-    "0b0300b0030000000000014417935cad9400"
+    "0b0300b003000000000001aabbccddeeff00"
 )
 FRAME_SPEED_1 = bytes.fromhex(
     "0004190000640000000064010006a00000000000000000007800000000002ff9"
-    "0b0300b0030000000000014417935cad9400"
+    "0b0300b003000000000001aabbccddeeff00"
 )
 FRAME_SPEED_2 = bytes.fromhex(
     "00042d0000640000000064020006a00000000000000000007821000000009c00"
-    "0b0300b0030000000000014417935cad9400"
+    "0b0300b003000000000001aabbccddeeff00"
 )
 FRAME_SPEED_3 = bytes.fromhex(
     "00043c0000640000000064030006a0000000000000000000783900000000 6295".replace(" ", "")
-    + "0b0300b0030000000000014417935cad9400"
+    + "0b0300b003000000000001aabbccddeeff00"
 )
 FRAME_SPEED_4 = bytes.fromhex(
     "0004630000640000000064040006a0000000000000000000785600000000 1ec5".replace(" ", "")
-    + "0b0300b0030000000000014417935cad9400"
+    + "0b0300b003000000000001aabbccddeeff00"
 )
 FRAME_LIGHT_4 = bytes.fromhex(
     "0004000004640000000064000006a0000000000000000000780000000000e1cf"
-    "0b0300a0030000000000014417935cad9400"
+    "0b0300a003000000000001aabbccddeeff00"
 )
 FRAME_OFF_ACK = bytes.fromhex(
     "0104630000640000000064000006a0000000000000000000787f00000000d624"
-    "0b0300b0030000000000014417935cad9400"
+    "0b0300b003000000000001aabbccddeeff00"
 )
 FRAME_LOCKED = bytes.fromhex(
     "00000000000000000000000000000000000000000000000000000000000000000"
-    "b0300a5030000000000004417935cad9400"
+    "b0300a503000000000000aabbccddeeff00"
 )
 
 ALL_UNLOCKED = [
