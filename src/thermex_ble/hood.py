@@ -29,6 +29,7 @@ _LOGGER = logging.getLogger(__name__)
 #: one connection at a time. Hold the link open rather than reconnecting per
 #: command - that also keeps notifications flowing so panel changes are seen.
 DISCONNECT_GRACE = 0.5
+DISCONNECT_TIMEOUT = 10.0
 
 #: How long to wait for the hood to confirm a command in a status frame.
 CONFIRM_TIMEOUT = 3.0
@@ -53,6 +54,8 @@ class ThermexHood:
         self._callbacks: list[Callable[[HoodState], None]] = []
         self._lock = asyncio.Lock()
         self._connected_event = asyncio.Event()
+        self._disconnected_event = asyncio.Event()
+        self._ready = False
 
     # --- properties --------------------------------------------------------
 
@@ -69,7 +72,7 @@ class ThermexHood:
 
     @property
     def is_connected(self) -> bool:
-        return self._client is not None and self._client.is_connected
+        return self._ready and self._client is not None and self._client.is_connected
 
     # --- callbacks ---------------------------------------------------------
 
@@ -99,15 +102,35 @@ class ThermexHood:
             if self.is_connected:
                 return
 
+            if self._client is not None:
+                await self._disconnect_client()
+
             self._connected_event.clear()
+            disconnected = asyncio.Event()
+            self._disconnected_event = disconnected
+
+            def on_disconnect(client: BleakClient) -> None:
+                disconnected.set()
+                self._on_disconnect(client)
+
             self._client = await establish_connection(
                 BleakClient,
                 self._ble_device,
                 self.address,
-                self._on_disconnect,
+                on_disconnect,
             )
-            await self._client.start_notify(CHAR_UUID, self._on_notify)
-            await self._client.write_gatt_char(CHAR_UUID, UNLOCK, response=True)
+            try:
+                await self._client.start_notify(CHAR_UUID, self._on_notify)
+                await self._client.write_gatt_char(CHAR_UUID, UNLOCK, response=True)
+                if disconnected.is_set():
+                    raise ConnectionError(f"Disconnected while unlocking {self.address}")
+                self._ready = True
+            except (Exception, asyncio.CancelledError):
+                try:
+                    await self._disconnect_client()
+                except Exception:
+                    _LOGGER.warning("Failed to clean up %s", self.address, exc_info=True)
+                raise
             _LOGGER.debug("Connected and unlocked %s", self.address)
 
         # Wait for the first real frame so callers see a populated state.
@@ -118,18 +141,37 @@ class ThermexHood:
 
     async def disconnect(self) -> None:
         async with self._lock:
-            if self._client is None:
-                return
-            client, self._client = self._client, None
+            await self._disconnect_client()
+
+    async def _disconnect_client(self) -> None:
+        """Release the link while holding the connection lock.
+
+        Retain the client on timeout so a later connect retries cleanup instead
+        of opening another link while the proxy may still own the old one.
+        """
+        client = self._client
+        if client is None:
+            return
+        disconnected = self._disconnected_event
+        self._ready = False
+        self._connected_event.clear()
+        try:
             try:
-                await client.disconnect()
+                await asyncio.wait_for(client.disconnect(), DISCONNECT_TIMEOUT)
             except Exception:  # noqa: BLE001
                 _LOGGER.debug("Error while disconnecting %s", self.address, exc_info=True)
+            await asyncio.wait_for(disconnected.wait(), DISCONNECT_TIMEOUT)
+            if self._client is client:
+                self._client = None
+        finally:
             await asyncio.sleep(DISCONNECT_GRACE)
 
-    def _on_disconnect(self, _client: BleakClient) -> None:
+    def _on_disconnect(self, client: BleakClient) -> None:
+        if client is not self._client:
+            return
         _LOGGER.debug("Disconnected from %s", self.address)
         self._client = None
+        self._ready = False
         self._connected_event.clear()
 
     def _on_notify(self, _sender: Any, data: bytearray) -> None:
