@@ -56,3 +56,20 @@ captured from a real hood. No hardware is needed to run the tests.
 ## Licence
 
 MIT. Not affiliated with or endorsed by Thermex.
+
+## Connection lifecycle
+
+`connect()` only succeeds after an unlocked status frame is received. Connection
+setup and writes have timeouts, and command writes are serialized with link
+cleanup. Late notifications and disconnect callbacks from an older connection
+are ignored.
+
+Use `register_disconnect_callback(callback)` to invalidate cached state as soon
+as the current link drops; it returns an unsubscribe function. The library does
+not run a reconnect loop itself. A long-running consumer, such as the Home
+Assistant integration, must supervise the connection and re-resolve the current
+Bluetooth device/proxy before recovery.
+
+Cleanup accepts an already-disconnected client even when its proxy omitted the
+disconnect callback. If the client still reports a live link after cleanup times
+out, it is retained so another connection is not opened on top of it.

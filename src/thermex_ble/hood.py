@@ -33,6 +33,8 @@ DISCONNECT_TIMEOUT = 10.0
 
 #: How long to wait for the hood to confirm a command in a status frame.
 CONFIRM_TIMEOUT = 3.0
+CONNECT_TIMEOUT = 30.0
+WRITE_TIMEOUT = 10.0
 
 
 class ThermexHood:
@@ -52,6 +54,7 @@ class ThermexHood:
         self._client: BleakClient | None = None
         self._state: HoodState | None = None
         self._callbacks: list[Callable[[HoodState], None]] = []
+        self._disconnect_callbacks: list[Callable[[], None]] = []
         self._lock = asyncio.Lock()
         self._connected_event = asyncio.Event()
         self._disconnected_event = asyncio.Event()
@@ -94,6 +97,16 @@ class ThermexHood:
             except Exception:  # noqa: BLE001 - a bad subscriber must not kill the link
                 _LOGGER.exception("Error in state callback")
 
+    def register_disconnect_callback(self, callback: Callable[[], None]) -> Callable[[], None]:
+        """Subscribe to link loss so consumers can invalidate their state."""
+        self._disconnect_callbacks.append(callback)
+
+        def unregister() -> None:
+            if callback in self._disconnect_callbacks:
+                self._disconnect_callbacks.remove(callback)
+
+        return unregister
+
     # --- connection --------------------------------------------------------
 
     async def connect(self) -> None:
@@ -106,6 +119,7 @@ class ThermexHood:
                 await self._disconnect_client()
 
             self._connected_event.clear()
+            self._state = None
             disconnected = asyncio.Event()
             self._disconnected_event = disconnected
 
@@ -113,18 +127,28 @@ class ThermexHood:
                 disconnected.set()
                 self._on_disconnect(client)
 
-            self._client = await establish_connection(
-                BleakClient,
-                self._ble_device,
-                self.address,
-                on_disconnect,
-            )
             try:
-                await self._client.start_notify(CHAR_UUID, self._on_notify)
-                await self._client.write_gatt_char(CHAR_UUID, UNLOCK, response=True)
-                if disconnected.is_set():
-                    raise ConnectionError(f"Disconnected while unlocking {self.address}")
-                self._ready = True
+                async with asyncio.timeout(CONNECT_TIMEOUT):
+                    self._client = await establish_connection(
+                        BleakClient,
+                        self._ble_device,
+                        self.address,
+                        on_disconnect,
+                    )
+                    client = self._client
+
+                    def on_notify(sender: Any, data: bytearray) -> None:
+                        if self._client is client:
+                            self._on_notify(sender, data)
+
+                    await client.start_notify(CHAR_UUID, on_notify)
+                    await client.write_gatt_char(CHAR_UUID, UNLOCK, response=True)
+                    # Do not report ready until the hood actually sends state.
+                    # Keep the lock while waiting so commands cannot race setup.
+                    await asyncio.wait_for(self._connected_event.wait(), CONFIRM_TIMEOUT)
+                    if disconnected.is_set() or not client.is_connected:
+                        raise ConnectionError(f"Disconnected while unlocking {self.address}")
+                    self._ready = True
             except (Exception, asyncio.CancelledError):
                 try:
                     await self._disconnect_client()
@@ -132,12 +156,6 @@ class ThermexHood:
                     _LOGGER.warning("Failed to clean up %s", self.address, exc_info=True)
                 raise
             _LOGGER.debug("Connected and unlocked %s", self.address)
-
-        # Wait for the first real frame so callers see a populated state.
-        try:
-            await asyncio.wait_for(self._connected_event.wait(), CONFIRM_TIMEOUT)
-        except TimeoutError:
-            _LOGGER.warning("No unlocked status frame from %s after unlock", self.address)
 
     async def disconnect(self) -> None:
         async with self._lock:
@@ -160,7 +178,14 @@ class ThermexHood:
                 await asyncio.wait_for(client.disconnect(), DISCONNECT_TIMEOUT)
             except Exception:  # noqa: BLE001
                 _LOGGER.debug("Error while disconnecting %s", self.address, exc_info=True)
-            await asyncio.wait_for(disconnected.wait(), DISCONNECT_TIMEOUT)
+            # Some proxy failures clear is_connected without delivering the
+            # callback. Only retain the client while it may still own a link.
+            if client.is_connected and not disconnected.is_set():
+                try:
+                    await asyncio.wait_for(disconnected.wait(), DISCONNECT_TIMEOUT)
+                except TimeoutError:
+                    if client.is_connected:
+                        raise
             if self._client is client:
                 self._client = None
         finally:
@@ -173,6 +198,11 @@ class ThermexHood:
         self._client = None
         self._ready = False
         self._connected_event.clear()
+        for callback in tuple(self._disconnect_callbacks):
+            try:
+                callback()
+            except Exception:  # a subscriber must not break connection cleanup
+                _LOGGER.exception("Error in disconnect callback")
 
     def _on_notify(self, _sender: Any, data: bytearray) -> None:
         try:
@@ -190,9 +220,13 @@ class ThermexHood:
     async def _write(self, payload: bytes) -> None:
         if not self.is_connected:
             await self.connect()
-        assert self._client is not None
-        _LOGGER.debug("Writing %s to %s", payload.hex(), self.address)
-        await self._client.write_gatt_char(CHAR_UUID, payload, response=True)
+        async with self._lock:
+            client = self._client
+            if not self.is_connected or client is None:
+                raise ConnectionError(f"Disconnected before writing to {self.address}")
+            _LOGGER.debug("Writing %s to %s", payload.hex(), self.address)
+            async with asyncio.timeout(WRITE_TIMEOUT):
+                await client.write_gatt_char(CHAR_UUID, payload, response=True)
 
     async def set_fan(self, speed: int) -> None:
         """Set the fan to a step between 0 (off) and 4."""
